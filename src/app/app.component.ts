@@ -1,4 +1,4 @@
-import { CdkDragDrop, DragDropModule, moveItemInArray } from '@angular/cdk/drag-drop';
+import { CdkDragDrop, DragDropModule } from '@angular/cdk/drag-drop';
 import { CommonModule } from '@angular/common';
 import { Component, OnDestroy, OnInit } from '@angular/core';
 import { MatButtonModule } from '@angular/material/button';
@@ -10,13 +10,34 @@ import { MatToolbarModule } from '@angular/material/toolbar';
 import { Store } from '@ngrx/store';
 import { TranslocoModule } from '@jsverse/transloco';
 import { Subscription } from 'rxjs';
-import { activateVersion, addVersion, reorderLines, reviewCue, reviewLine, setOnline, toggleRehearsal } from './state/script.actions';
+import {
+  activateVersion,
+  addVersion,
+  openRehearsalWindow,
+  reorderLines,
+  reviewCue,
+  reviewLine,
+  setOnline,
+  toggleRehearsal
+} from './state/script.actions';
 import { ScriptState, ScriptVersion } from './state/script.reducer';
+import { RehearsalWindowComponent } from './rehearsal-window/rehearsal-window.component';
 
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [CommonModule, DragDropModule, MatToolbarModule, MatButtonModule, MatCardModule, MatTabsModule, MatChipsModule, MatIconModule, TranslocoModule],
+  imports: [
+    CommonModule,
+    DragDropModule,
+    MatToolbarModule,
+    MatButtonModule,
+    MatCardModule,
+    MatTabsModule,
+    MatChipsModule,
+    MatIconModule,
+    TranslocoModule,
+    RehearsalWindowComponent
+  ],
   template: `
     <mat-toolbar color="primary" class="topbar">
       <span>{{ 'title' | transloco }}</span>
@@ -30,39 +51,70 @@ import { ScriptState, ScriptVersion } from './state/script.reducer';
     </mat-toolbar>
 
     <main [class.rehearsal]="(state$ | async)?.rehearsalMode">
+      <section class="migration-banner" *ngIf="(state$ | async)?.migrated">
+        <mat-card>
+          <mat-card-title>旧数据迁移</mat-card-title>
+          <p>检测到旧数据缺条目编号，已按文本指纹补号并标记迁移（{{ (state$ | async)?.migrationNotes?.length }} 条）。补号后的条目可正常采纳、退回与同步。</p>
+        </mat-card>
+      </section>
+
       <section class="summary">
         <mat-card>
           <mat-card-title>版本控制</mat-card-title>
           <p>编剧提交后由舞台监督逐条采纳，未确认内容不会进入排练版本。</p>
           <div class="chips">
-            <button mat-stroked-button *ngFor="let version of (state$ | async)?.versions" [color]="version.id === (state$ | async)?.activeVersionId ? 'primary' : ''" (click)="activate(version.id)">
-              {{ version.label }} · {{ version.playwright }}
+            <button
+              mat-stroked-button
+              *ngFor="let version of (state$ | async)?.versions"
+              [color]="version.id === (state$ | async)?.activeVersionId ? 'primary' : ''"
+              (click)="activate(version.id)"
+            >
+              {{ version.label }} · {{ version.playwright }} · {{ version.source }}
             </button>
             <button mat-flat-button color="primary" (click)="createDraft()">新增导演修订</button>
+            <button mat-flat-button color="accent" (click)="openWindow()">排练窗口</button>
           </div>
         </mat-card>
       </section>
+
+      <app-rehearsal-window
+        *ngIf="(state$ | async)?.rehearsalWindow as window"
+        [window]="window"
+        [online]="(state$ | async)?.online ?? true"
+      ></app-rehearsal-window>
 
       <section *ngIf="activeVersion$ | async as activeVersion" class="workspace">
         <mat-card class="script">
           <mat-card-title>{{ activeVersion.label }}</mat-card-title>
           <mat-card-subtitle>{{ activeVersion.note }}</mat-card-subtitle>
+          <p class="confirmed-hint" *ngIf="(state$ | async)?.rehearsalMode">排练模式：仅读取已确认快照（已采纳条目）。</p>
           <mat-tab-group>
             <mat-tab label="角色台词">
-              <div cdkDropList (cdkDropListDropped)="dropLine($event)"><article class="line" cdkDrag *ngFor="let line of activeVersion.lines">
-                <div><b>{{ line.role }}</b><p>{{ line.text }}</p><span class="status" [class.ok]="line.status === 'accepted'">{{ line.status }}</span></div>
-                <div>
-                  <button mat-button color="primary" (click)="reviewLine(line.id, 'accepted')">采纳</button>
-                  <button mat-button color="warn" (click)="reviewLine(line.id, 'returned')">退回</button>
-                </div>
-              </article></div>
+              <div cdkDropList [cdkDropListDisabled]="(state$ | async)?.rehearsalMode" (cdkDropListDropped)="dropLine($event)">
+                <article class="line" cdkDrag [cdkDragDisabled]="(state$ | async)?.rehearsalMode" *ngFor="let line of visibleLines(activeVersion, (state$ | async)?.rehearsalMode ?? false)">
+                  <div>
+                    <b>{{ line.role }}</b>
+                    <p>{{ line.text }}</p>
+                    <span class="status" [class.ok]="line.status === 'accepted'">{{ line.status }}</span>
+                  </div>
+                  <div>
+                    <button mat-button color="primary" (click)="reviewLine(line.id, 'accepted')" [disabled]="(state$ | async)?.rehearsalMode">采纳</button>
+                    <button mat-button color="warn" (click)="reviewLine(line.id, 'returned')" [disabled]="(state$ | async)?.rehearsalMode">退回</button>
+                  </div>
+                </article>
+              </div>
             </mat-tab>
             <mat-tab label="舞台提示">
-              <article class="line" *ngFor="let cue of activeVersion.cues">
-                <div><b>{{ cue.scene }}</b><p>{{ cue.text }}</p><span class="status" [class.ok]="cue.status === 'accepted'">{{ cue.status }}</span></div>
+              <article class="line" *ngFor="let cue of visibleCues(activeVersion, (state$ | async)?.rehearsalMode ?? false)">
                 <div>
-                  <button mat-button color="primary" (click)="reviewCue(cue.id, 'accepted')">采纳</button>
-                  <button mat-button color="warn" (click)="reviewCue(cue.id, 'returned')">退回</button>
+                  <b>{{ cue.scene }}</b>
+                  <p>{{ cue.text }}</p>
+                  <span class="timing">计时：{{ cue.timing || '未设置' }}</span>
+                  <span class="status" [class.ok]="cue.status === 'accepted'">{{ cue.status }}</span>
+                </div>
+                <div>
+                  <button mat-button color="primary" (click)="reviewCue(cue.id, 'accepted')" [disabled]="(state$ | async)?.rehearsalMode">采纳</button>
+                  <button mat-button color="warn" (click)="reviewCue(cue.id, 'returned')" [disabled]="(state$ | async)?.rehearsalMode">退回</button>
                 </div>
               </article>
             </mat-tab>
@@ -88,12 +140,16 @@ import { ScriptState, ScriptVersion } from './state/script.reducer';
     main.rehearsal { max-width: 860px; background: #111827; color: #f9fafb; margin-top: 0; }
     main.rehearsal .script, main.rehearsal .compare, main.rehearsal .summary { opacity: .92; }
     .summary { margin-bottom: 18px; }
-    .chips { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
+    .migration-banner { margin-bottom: 18px; }
+    .migration-banner mat-card-title { font-size: 16px; color: #b45309; }
+    .chips { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; align-items: center; }
     .workspace { display: grid; grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr); gap: 18px; }
     .line { cursor: grab; display: flex; justify-content: space-between; gap: 16px; align-items: center; padding: 16px 0; border-bottom: 1px solid #e5e7eb; }
     .line p { margin: 8px 0; font-size: 17px; line-height: 1.6; }
+    .timing { display: inline-block; margin-right: 10px; font-size: 13px; color: #2563eb; }
     .status { font-size: 12px; color: #b45309; }
     .status.ok { color: #15803d; }
+    .confirmed-hint { font-size: 13px; color: #15803d; margin: 8px 0 0; }
     .version-name { padding: 12px; background: #f3f4f6; border-radius: 8px; }
     .diff { display: flex; justify-content: space-between; border-bottom: 1px solid #e5e7eb; padding: 14px 0; }
     .diff.warn b { color: #b45309; }
@@ -125,26 +181,62 @@ export class AppComponent implements OnInit, OnDestroy {
     this.subscription?.unsubscribe();
   }
 
-  activate(id: string) { this.store.dispatch(activateVersion({ id })); }
-  toggleRehearsal() { this.store.dispatch(toggleRehearsal()); }
-  setOnline(online: boolean) { this.store.dispatch(setOnline({ online })); }
-  toggleOnline() { this.state$.subscribe((state) => this.setOnline(!state.online)).unsubscribe(); }
-  reviewLine(id: string, decision: 'accepted' | 'returned') { this.store.dispatch(reviewLine({ id, decision })); }
-  dropLine(event: CdkDragDrop<unknown>) { if (event.previousIndex !== event.currentIndex) this.store.dispatch(reorderLines({ from: event.previousIndex, to: event.currentIndex })); }
-  reviewCue(id: string, decision: 'accepted' | 'returned') { this.store.dispatch(reviewCue({ id, decision })); }
-  pendingCount(version: ScriptVersion) { return version.lines.filter((item) => item.status === 'pending').length + version.cues.filter((item) => item.status === 'pending').length; }
+  activate(id: string) {
+    this.store.dispatch(activateVersion({ id }));
+  }
+
+  openWindow() {
+    this.state$.subscribe((state) => this.store.dispatch(openRehearsalWindow({ versionId: state.activeVersionId }))).unsubscribe();
+  }
+
+  toggleRehearsal() {
+    this.store.dispatch(toggleRehearsal());
+  }
+
+  setOnline(online: boolean) {
+    this.store.dispatch(setOnline({ online }));
+  }
+
+  toggleOnline() {
+    this.state$.subscribe((state) => this.setOnline(!state.online)).unsubscribe();
+  }
+
+  reviewLine(id: string, decision: 'accepted' | 'returned') {
+    this.store.dispatch(reviewLine({ id, decision }));
+  }
+
+  dropLine(event: CdkDragDrop<unknown>) {
+    if (event.previousIndex !== event.currentIndex) this.store.dispatch(reorderLines({ from: event.previousIndex, to: event.currentIndex }));
+  }
+
+  reviewCue(id: string, decision: 'accepted' | 'returned') {
+    this.store.dispatch(reviewCue({ id, decision }));
+  }
+
+  visibleLines(version: ScriptVersion, rehearsal: boolean) {
+    return rehearsal ? version.lines.filter((line) => line.status === 'accepted') : version.lines;
+  }
+
+  visibleCues(version: ScriptVersion, rehearsal: boolean) {
+    return rehearsal ? version.cues.filter((cue) => cue.status === 'accepted') : version.cues;
+  }
+
+  pendingCount(version: ScriptVersion) {
+    return version.lines.filter((item) => item.status === 'pending').length + version.cues.filter((item) => item.status === 'pending').length;
+  }
+
   createDraft() {
     const id = `v${Date.now().toString().slice(-4)}`;
     const version: ScriptVersion = {
       id,
       label: `导演修订 ${id}`,
       playwright: '本地草稿',
+      source: '本地草稿',
       note: '断网期间创建的修订，等待与编剧版本合并。',
       lines: [{ id: `${id}-l1`, role: '周岚', text: '这次换你告诉我，灯亮之后准备去哪里。', status: 'pending' }],
-      cues: [{ id: `${id}-c1`, scene: '第三场', text: '追光保持到台词结束，再执行全场收光', status: 'pending' }]
+      cues: [{ id: `${id}-c1`, scene: '第三场', text: '追光保持到台词结束，再执行全场收光', timing: '', status: 'pending' }]
     };
     this.store.dispatch(addVersion({ version }));
     this.store.dispatch(activateVersion({ id }));
   }
 }
-
